@@ -1,0 +1,908 @@
+
+#if !(defined(USING_ATYPE_TANGENT) || defined(USING_ATYPE_PC) || defined(USING_ATYPE_RAPID))
+void buildNeighborsList(const T rMin)
+{    
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      _filter.buildNeighborListWeight(mesh, rMin);
+    }    
+}
+
+void applyFilter()
+{
+    
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      _filter.applyFilter(mesh, _spalartAllmarasFields.sensitivity, _spalartAllmarasFields.beta);
+    }
+}
+#endif
+
+
+void initResidualFieldSpalartAllmaras()
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();    	
+      TArray& resSACell = dynamic_cast<TArray&>(_spalartAllmarasFields.spalartAllmarasResidual[cells]);	
+      resSACell.zero();
+    }  
+}
+
+/////////Copying fields and values ///////////////////
+
+void copyNuTildeField(const Field& nuTildeDoubleField, const MeshList& meshesDouble)
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+	
+      const Mesh& meshDouble = *meshesDouble[n];
+      const StorageSite& cellsDouble = meshDouble.getCells();
+	
+      const int nCells = cells.getCountLevel1();
+
+
+      TArray& nuTildeCell = dynamic_cast<TArray&>(_spalartAllmarasFields.nuTilde[cells]);
+      const Array<double>& nuTildeCellDouble = dynamic_cast<const Array<double>&>(nuTildeDoubleField[cellsDouble]);
+
+      for(int i=0; i<nCells; i++)
+	{
+	  nuTildeCell[i] = nuTildeCellDouble[i];
+	}
+
+    }    
+}
+
+void copyBetaField(const Field& betaDoubleField, const MeshList& meshesDouble)
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+	
+      const Mesh& meshDouble = *meshesDouble[n];
+      const StorageSite& cellsDouble = meshDouble.getCells();
+	
+      const int nCells = cells.getCountLevel1();
+      const int nCellsSelfCount = cells.getSelfCount();
+
+      TArray& betaCell = dynamic_cast<TArray&>(_spalartAllmarasFields.beta[cells]);
+      const Array<double>& betaCellDouble = dynamic_cast<const Array<double>&>(betaDoubleField[cellsDouble]);
+	
+      for(int i=0; i<nCells; i++)
+	{
+	  betaCell[i] = betaCellDouble[i];
+	}
+      _nDesignVariables = nCellsSelfCount;
+    }    
+}
+
+void interpolateSourceFieldSIMP()
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+
+      TArray& source = dynamic_cast<TArray&>(_spalartAllmarasFields.source[cells]);
+      const TArray& beta = dynamic_cast<const TArray&>(_spalartAllmarasFields.beta[cells]);	
+	
+      const int nCells = cells.getCountLevel1();
+		
+      const T alphaSolid = _options["alphaSolid"];
+      const T alphaFluid = _options["alphaFluid"];
+      const T p = _options["p"];
+      for ( int c=0; c<nCells; c++)
+	{	    
+	  source[c] = -1.0*((alphaSolid - alphaFluid)*pow(beta[c],p) + alphaFluid);
+	}
+
+    }    
+}
+
+
+void updateBetaFieldGhostCells()
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+      MultiField::ArrayIndex tIndex(&_spalartAllmarasFields.nuTilde, &cells);
+      TArray& beta = dynamic_cast<TArray&>(_spalartAllmarasFields.beta[cells]);	
+      foreach(const FaceGroupPtr fgPtr, mesh.getBoundaryFaceGroups())
+	{
+	  const FaceGroup& fg = *fgPtr;
+	  const StorageSite& faces = fg.site;
+	  const int nFaces = faces.getCount();
+	  const CRConnectivity& faceCells = mesh.getFaceCells(faces);
+	  for(int f=0; f<nFaces; f++)
+	    {
+	      const int c0 = faceCells(f,0);
+	      const int c1 = faceCells(f,1);
+	      beta[c1] = beta[c0];
+	    }
+	}
+
+    }    
+}
+
+
+void ComputeSpalartAllmarasResidual()
+{
+  //SA residual
+  LinearSystem ls;
+  initLinearization(ls);        
+  ls.initAssembly();
+  linearize(ls);
+  MultiFieldMatrix& matrix = ls.getMatrix();
+  MultiField& resSAmf = ls.getB();
+
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+      const int nCells = cells.getCountLevel1();
+      MultiField::ArrayIndex tIndex(&_spalartAllmarasFields.nuTilde, &cells);
+      TArray& resSAField = dynamic_cast<TArray&>(resSAmf[tIndex]);
+      TArray& residualSACell = dynamic_cast<TArray&>(_spalartAllmarasFields.spalartAllmarasResidual[cells]);
+      for(int i=0; i<nCells; i++)
+	{
+	  residualSACell[i] = resSAField[i];
+	}
+    }
+}
+
+void setObjectiveFunctionSA(const T objFunction)
+{
+  _objFunctionSpalartAllmarasModel = objFunction;
+}
+
+void printResidualField()
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+      MultiField::ArrayIndex tIndex(&_spalartAllmarasFields.nuTilde, &cells);
+      TArray& rCell = dynamic_cast<TArray&>(_spalartAllmarasFields.spalartAllmarasResidual[cells]);
+      const int nCells = cells.getCount();    
+      cout << "\n";
+      for(int n=0; n<nCells; n++)
+	{
+	  cout << n << "th cell Residual" << rCell[n] << endl;
+	}
+    }    
+}
+ 
+
+#if !(defined(USING_ATYPE_TANGENT) || defined(USING_ATYPE_PC) || defined(USING_ATYPE_RAPID))
+void dumpBetaSensistivityFields()
+{
+
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+      MultiField::ArrayIndex tIndex(&_spalartAllmarasFields.nuTilde, &cells);
+	
+      TArray& betaCell = dynamic_cast<TArray&>(_spalartAllmarasFields.beta[cells]);
+      TArray& sensCell = dynamic_cast<TArray&>(_spalartAllmarasFields.sensitivity[cells]);
+      const int nCellsWithoutGhosts = cells.getSelfCount();
+	
+      //Write in binary format so that Petsc can read directly
+      //Temporary variable for big endian version of the variable
+      int bigEndianInteger;
+      double bigEndianDouble;
+      //Writing Sensitivity
+      string sensitivityFileNameBinary = "Sensitivity.bin";
+      FILE *sensitivityFileBinary = fopen(sensitivityFileNameBinary.c_str(),"wb"); 
+
+      string betaFileNameBinary = "Beta.bin";
+      FILE *betaFileBinary = fopen(betaFileNameBinary.c_str(),"wb"); 
+
+      bigEndianInteger = 1211214;
+      LowEndian2BigEndian(bigEndianInteger);
+      fwrite(&bigEndianInteger, sizeof(int), 1, sensitivityFileBinary);
+      fwrite(&bigEndianInteger, sizeof(int), 1, betaFileBinary);
+
+      bigEndianInteger = nCellsWithoutGhosts;
+      LowEndian2BigEndian(bigEndianInteger);
+      fwrite(&bigEndianInteger, sizeof(int), 1, sensitivityFileBinary);
+      fwrite(&bigEndianInteger, sizeof(int), 1, betaFileBinary);
+
+      for(int i=0; i<nCellsWithoutGhosts; i++)
+	{
+	  bigEndianDouble = sensCell[i];
+	  LowEndian2BigEndian(bigEndianDouble);
+	  fwrite(&bigEndianDouble, sizeof(double), 1, sensitivityFileBinary);
+
+	  bigEndianDouble = betaCell[i];
+	  LowEndian2BigEndian(bigEndianDouble);
+	  fwrite(&bigEndianDouble, sizeof(double), 1, betaFileBinary);
+	}
+      fclose(sensitivityFileBinary);
+      fclose(betaFileBinary);
+	
+    }
+}
+#endif
+
+
+
+//Functions used to developing code
+
+void printNuTildeField()
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+      MultiField::ArrayIndex tIndex(&_spalartAllmarasFields.nuTilde, &cells);
+      TArray& nuTildeCell = dynamic_cast<TArray&>(_spalartAllmarasFields.nuTilde[cells]);
+      const int nCells = cells.getCount();      
+      cout << "\n";
+      for(int n=0; n<nCells; n++)
+	{
+	  cout << "Nth Cell temperature" << nuTildeCell[n] << endl;
+	}
+    }    
+}
+
+
+void printBetaField()
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+      MultiField::ArrayIndex tIndex(&_spalartAllmarasFields.nuTilde, &cells);
+      TArray& betaCell = dynamic_cast<TArray&>(_spalartAllmarasFields.beta[cells]);
+      const int nCells = cells.getCount();      
+      cout << "\n";
+      for(int n=0; n<nCells; n++)
+	{
+	  cout << n << "th cell beta" << betaCell[n] << endl;
+	}
+    }    
+}
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////
+void copyMomentumResidual(const Field& momentumRes)
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+	
+      const int nCells = cells.getCountLevel1();
+
+      VectorT3Array& momentumResidualSpalartAllmarasModel = dynamic_cast<VectorT3Array&>(_spalartAllmarasFields.momentumResidual[cells]);
+      const VectorT3Array& momentumResidualFlowModel = dynamic_cast<const VectorT3Array&>(momentumRes[cells]);
+	
+    
+      for(int i=0; i<nCells; i++)
+	{
+	  momentumResidualSpalartAllmarasModel[i][0] = momentumResidualFlowModel[i][0];
+	  momentumResidualSpalartAllmarasModel[i][1] = momentumResidualFlowModel[i][1];
+	  momentumResidualSpalartAllmarasModel[i][2] = momentumResidualFlowModel[i][2];
+	}
+    }
+}
+
+void copyContinuityResidual(const Field& continuityRes)
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+			
+      const int nCells = cells.getCountLevel1();
+
+      TArray& continuityResidualSpalartAllmarasModel = dynamic_cast<TArray&>(_spalartAllmarasFields.continuityResidual[cells]);
+      const TArray& continuityResidualFlowModel = dynamic_cast<const TArray&>(continuityRes[cells]);
+	    
+      for(int i=0; i<nCells; i++)
+	{
+	  continuityResidualSpalartAllmarasModel[i] = continuityResidualFlowModel[i];
+	}
+    }
+}
+
+void copyWallDistanceModelResidual(const Field& wallDistanceRes)
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+			
+      const int nCells = cells.getCountLevel1();
+
+      TArray& wallDistanceResidualSpalartAllmarasModel = dynamic_cast<TArray&>(_spalartAllmarasFields.wallDistanceResidual[cells]);
+      const TArray& wallDistanceResidualFlowModel = dynamic_cast<const TArray&>(wallDistanceRes[cells]);
+	    
+      for(int i=0; i<nCells; i++)
+	{
+	  wallDistanceResidualSpalartAllmarasModel[i] = wallDistanceResidualFlowModel[i];
+	}
+    }
+}
+
+
+void copyMassFlux(const Field& massFlux)
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& faces = mesh.getFaces();
+	
+      const int nFaces = faces.getCount();
+
+      TArray& convectionFlux = dynamic_cast<TArray&>(_spalartAllmarasFields.convectionFlux[faces]);
+      const TArray& massFluxFlowModel = dynamic_cast<const TArray&>(massFlux[faces]);
+	    
+      for(int f=0; f<nFaces; f++)
+	{
+	  convectionFlux[f] = massFluxFlowModel[f];
+	}
+    }
+}
+
+void copyWallDistanceField(const Field& wallDistanceField)
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+      const int nCells = cells.getCountLevel1();
+
+      TArray& wdCellTo = dynamic_cast<TArray&>(_spalartAllmarasFields.wallDistance[cells]);
+      const TArray& wdCellFrom = dynamic_cast<const TArray&> (wallDistanceField[cells]);
+
+      for(int i=0; i<nCells; i++)
+	{
+	  wdCellTo[i] = wdCellFrom[i];
+	}
+
+    }    
+}
+
+void copyVorticityMagnitudeField(const Field& vorticityMagnitudeFlowField)
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+      const int nCells = cells.getCountLevel1();
+
+      TArray& vorMagTo = dynamic_cast<TArray&>(_spalartAllmarasFields.vorticityMagnitude[cells]);
+      const TArray& vorMagFrom = dynamic_cast<const TArray&> (vorticityMagnitudeFlowField[cells]);
+
+      for(int i=0; i<nCells; i++)
+	{
+	  vorMagTo[i] = vorMagFrom[i];
+	}
+
+    }    
+}
+
+
+void setObjectiveFunctionFlow(const VectorT3 objFunction, const int component)
+{
+  _objFunctionFlowModel = objFunction[component];
+}
+
+
+
+#if ( defined(USING_ATYPE_RAPID) )
+
+void setIndependentStateVariablesFlowTurbulent()
+{
+  const int numMeshes = _meshes.size();
+    
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+      TArray& nuTildeCell = dynamic_cast<TArray&>(_spalartAllmarasFields.nuTilde[cells]);
+      const int nCells = cells.getCountLevel1(); 
+      int index = 0;
+      for(int c=0; c<nCells; c++)
+	{
+	  index = 6*c;
+	  nuTildeCell[c].setIndex(index+4);
+	}
+    }        
+}
+
+/*
+//We don't need this. As we never run SA model independently unlike thermal model. 
+void setIndependentDesignVariablesFlowTurbulent()
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+      const int nCells = cells.getCount(); 
+      const int nCellsWithoutGhosts = cells.getSelfCount();
+      TArray& betaCell = dynamic_cast<TArray&>(_spalartAllmarasFields.beta[cells]);
+	
+      for(int c=0; c<nCellsWithoutGhosts; c++)
+	{
+	  betaCell[c].setIndex(6*nCells+c);
+	}
+      _nDesignVariables = nCellsWithoutGhosts;
+    }
+}
+*/
+
+
+void WriteResidualGradientsToMatlabFlowTurbulent()
+{
+  for ( int id = 0; id < _meshes.size(); id++ )
+    {
+      const Mesh& mesh = *_meshes[id];
+      const StorageSite& cells = mesh.getCells();    
+	
+      VectorT3Array& rMomentumCell = dynamic_cast<VectorT3Array&>(_spalartAllmarasFields.momentumResidual[cells]);
+      TArray& rContinuityCell = dynamic_cast<TArray&>(_spalartAllmarasFields.continuityResidual[cells]);
+      TArray& rSACell = dynamic_cast<TArray&>(_spalartAllmarasFields.spalartAllmarasResidual[cells]);
+      TArray& rWDCell = dynamic_cast<TArray&>(_spalartAllmarasFields.wallDistanceResidual[cells]);
+
+      const int nCells = cells.getCountLevel1();
+      //const int nCellsWithoutGhosts = cells.getSelfCount();
+
+      string SV = "DRDSV.mat";
+      string DV = "DRDDV.mat";
+      FILE *DRDSVFile = fopen(SV.c_str(),"wb");
+      FILE *DRDDVFile = fopen(DV.c_str(),"wb");
+	
+      cout << endl;
+      for(int i=0; i<nCells; i++)
+	{
+	  for (int j=0; j<3; j++)
+	    {
+	      //cout << rMomentumCell[i][j]._v << endl;
+	      foreach(const typename Rapid::PartialDerivatives::value_type& ii, rMomentumCell[i][j]._dv)
+		{
+		  if (ii.first < 6*nCells)	       
+		    fprintf(DRDSVFile, "%d %d %22.15le \n", 6*i+j+1, ii.first+1, ii.second); 
+		  else
+		    fprintf(DRDDVFile, "%d %d %22.15le \n", 6*i+j+1, ii.first-6*nCells+1, ii.second); 
+		}
+	    }
+	  //cout << rContinuityCell[i]._v << endl;
+	  foreach(const typename Rapid::PartialDerivatives::value_type& ii, rContinuityCell[i]._dv)
+	    {
+	      if (ii.first < 6*nCells)
+		{
+		  fprintf(DRDSVFile, "%d %d %22.15le \n", 6*i+3+1, ii.first+1, ii.second); 
+		}
+	      else
+		{
+		  fprintf(DRDDVFile, "%d %d %22.15le \n", 6*i+3+1, ii.first-6*nCells+1, ii.second);
+		}
+	    }	    
+	  foreach(const typename Rapid::PartialDerivatives::value_type& ii, rSACell[i]._dv)
+	    {
+	      if (ii.first < 6*nCells)
+		{
+		  fprintf(DRDSVFile, "%d %d %22.15le \n", 6*i+4+1, ii.first+1, ii.second); 
+		}
+	      else
+		{
+		  fprintf(DRDDVFile, "%d %d %22.15le \n", 6*i+4+1, ii.first-6*nCells+1, ii.second);
+		}
+	    }	
+	  foreach(const typename Rapid::PartialDerivatives::value_type& ii, rWDCell[i]._dv)
+	    {
+	      if (ii.first < 6*nCells)
+		{
+		  fprintf(DRDSVFile, "%d %d %22.15le \n", 6*i+5+1, ii.first+1, ii.second); 
+		}
+	      else
+		{
+		  fprintf(DRDDVFile, "%d %d %22.15le \n", 6*i+5+1, ii.first-6*nCells+1, ii.second);
+		}
+	    } 
+	}
+      fclose(DRDSVFile);
+      fclose(DRDDVFile);
+    }
+}
+
+void WriteResidualGradientsToPetscFlowTurbulent()
+{
+  for ( int id = 0; id < _meshes.size(); id++ )
+    {
+      const Mesh& mesh = *_meshes[id];
+      const StorageSite& cells = mesh.getCells();    
+	
+      VectorT3Array& rMomentumCell = dynamic_cast<VectorT3Array&>(_spalartAllmarasFields.momentumResidual[cells]);
+      TArray& rContinuityCell = dynamic_cast<TArray&>(_spalartAllmarasFields.continuityResidual[cells]);
+      TArray& rSACell = dynamic_cast<TArray&>(_spalartAllmarasFields.spalartAllmarasResidual[cells]);
+      TArray& rWDCell = dynamic_cast<TArray&>(_spalartAllmarasFields.wallDistanceResidual[cells]);
+	
+      const int nCells = cells.getCountLevel1();
+      //const int nCellsWithoutGhosts = cells.getSelfCount();
+
+      int nCoeffUVWPNuPhi = 0;
+      int nCoeffBeta = 0;
+
+      //Let the total number of cells be N
+      //Let the total number of interior cells be M
+      //N = M + Number of boundary faces
+
+      //There are 6 state variables U, V, W, P, NuTilde, Phi; Therefore 6N state variables
+      //There are M design variables
+
+      //There are 6N residuals
+      //dRdUVWPNuPhi is a matrix of size 6N X 6N
+
+      //nnzElementsRowdRdUVWPNuPhi is a double array that stores the number of non-zero values in each row. Or the number of independent variables on which the residual of the cell depends upon. 
+      double nnzElementsRowdRdUVWPNuPhi[6*nCells];
+      memset(nnzElementsRowdRdUVWPNuPhi, 0, (6*nCells)*sizeof(double));
+	
+      //dRdBeta is a matrix of size 6N X M
+      double nnzElementsRowdRdBeta[6*nCells];
+      memset(nnzElementsRowdRdBeta, 0, (6*nCells)*sizeof(double));
+
+      cout << endl;
+
+      for(int i=0; i<nCells; i++)
+	{
+	  for (int j = 0; j < 3; j++)
+	    {
+		  
+	      foreach(const typename Rapid::PartialDerivatives::value_type& ii, rMomentumCell[i][j]._dv)
+		{
+		  //First check whether the derivatives are with respect to X momentum (or U)
+		  if (ii.first < 6*nCells)
+		    {
+		      nnzElementsRowdRdUVWPNuPhi[6*i+j]++;
+		      nCoeffUVWPNuPhi++;
+		    }
+		  else
+		    {			  
+		      nnzElementsRowdRdBeta[6*i+j]++;
+		      nCoeffBeta++;
+		    }
+		}
+	    }
+	  //cout << "P-Res = " << rContinuityCell[i] << endl;
+	  foreach(const typename Rapid::PartialDerivatives::value_type& ii, rContinuityCell[i]._dv)
+	    {
+	      if (ii.first < 6*nCells)
+		{
+		  nnzElementsRowdRdUVWPNuPhi[6*i+3]++;
+		  nCoeffUVWPNuPhi++;
+		}
+	      else
+		{
+		  nnzElementsRowdRdBeta[6*i+3]++;
+		  nCoeffBeta++;
+		}
+	    }
+	  //Adding NuTilde residual
+	  foreach(const typename Rapid::PartialDerivatives::value_type& ii, rSACell[i]._dv)
+	    {
+	      if (ii.first < 6*nCells)
+		{
+		  nnzElementsRowdRdUVWPNuPhi[6*i+4]++;
+		  nCoeffUVWPNuPhi++;
+		}
+	      else
+		{
+		  nnzElementsRowdRdBeta[6*i+4]++;
+		  nCoeffBeta++;
+		}
+	    }
+
+	  //Adding Phi residual
+	  foreach(const typename Rapid::PartialDerivatives::value_type& ii, rWDCell[i]._dv)
+	    {
+	      if (ii.first < 6*nCells)
+		{
+		  nnzElementsRowdRdUVWPNuPhi[6*i+5]++;
+		  nCoeffUVWPNuPhi++;
+		}
+	      else
+		{
+		  nnzElementsRowdRdBeta[6*i+5]++;
+		  nCoeffBeta++;
+		}
+	    }
+	}
+      
+      //Write in binary format so that Petsc can read directly
+      string dRdUVWPNuPhiFileNameBinary = "dRdUVWPNuPhi.binary";
+      FILE *dRdUVWPNuPhiFileBinary = fopen(dRdUVWPNuPhiFileNameBinary.c_str(),"wb"); 
+      string dRdBetaFileNameBinary = "dRdBeta.binary";
+      FILE *dRdBetaFileBinary = fopen(dRdBetaFileNameBinary.c_str(),"wb"); 
+
+      //Temporary variable for big endian version of the variable
+      int bigEndianInteger;
+      double bigEndianDouble;
+
+      //some id number for petsc
+      bigEndianInteger = 1211216;
+      LowEndian2BigEndian(bigEndianInteger);
+      fwrite(&bigEndianInteger, sizeof(int), 1, dRdUVWPNuPhiFileBinary);
+      fwrite(&bigEndianInteger, sizeof(int), 1, dRdBetaFileBinary);
+
+      //Number of rows for dRdUVWP = 6N
+      bigEndianInteger = 6*nCells;
+      LowEndian2BigEndian(bigEndianInteger);	
+      fwrite(&bigEndianInteger, sizeof(int), 1, dRdUVWPNuPhiFileBinary);	  
+
+      //Number of columns for dRdUVWP = 6N
+      fwrite(&bigEndianInteger, sizeof(int), 1, dRdUVWPNuPhiFileBinary);
+	  
+      //Number of rows for dRdBeta = 6N
+      fwrite(&bigEndianInteger, sizeof(int), 1, dRdBetaFileBinary);
+
+      //Number of columns for dRdBeta = M
+      //bigEndianInteger = nCellsWithoutGhosts;
+      bigEndianInteger = _nDesignVariables;
+      LowEndian2BigEndian(bigEndianInteger);	
+      fwrite(&bigEndianInteger, sizeof(int), 1, dRdBetaFileBinary);
+
+      // Number of non-zero elements in dRdUVWP
+      bigEndianInteger = nCoeffUVWPNuPhi;
+      LowEndian2BigEndian(bigEndianInteger);	
+      fwrite(&bigEndianInteger, sizeof(int), 1, dRdUVWPNuPhiFileBinary);
+
+      // Number of non-zero elements in dRdBeta
+      bigEndianInteger = nCoeffBeta;
+      LowEndian2BigEndian(bigEndianInteger);	
+      fwrite(&bigEndianInteger, sizeof(int), 1, dRdBetaFileBinary);
+
+      // Number of non-zeros in each row in both dRdUVWP and dRdBeta
+      for(int i=0; i<6*nCells; i++)
+	{
+	  bigEndianInteger = nnzElementsRowdRdUVWPNuPhi[i];
+	  LowEndian2BigEndian(bigEndianInteger);	
+	  fwrite(&bigEndianInteger, sizeof(int), 1, dRdUVWPNuPhiFileBinary);
+	}
+      for(int i=0; i<6*nCells; i++)
+	{
+	  bigEndianInteger = nnzElementsRowdRdBeta[i];
+	  LowEndian2BigEndian(bigEndianInteger);	
+	  fwrite(&bigEndianInteger, sizeof(int), 1, dRdBetaFileBinary);
+	}
+      // Column indices of all non-zeros elements in both dRdUVWPNuPhi and dRdBeta (starting index is zero)	
+      for(int i=0; i<nCells; i++)
+	{
+	  for (int j=0; j<3; j++)
+	    {
+	      foreach(const typename Rapid::PartialDerivatives::value_type& ii, rMomentumCell[i][j]._dv)
+		{
+		  if (ii.first < 6*nCells)
+		    {
+		      bigEndianInteger = ii.first;
+		      LowEndian2BigEndian(bigEndianInteger);
+		      fwrite(&bigEndianInteger, sizeof(int), 1, dRdUVWPNuPhiFileBinary);
+		    }
+		  else
+		    {
+		      bigEndianInteger = ii.first-6*nCells;
+		      LowEndian2BigEndian(bigEndianInteger);
+		      fwrite(&bigEndianInteger, sizeof(int), 1, dRdBetaFileBinary);
+		    }
+		}
+
+	    }
+	  foreach(const typename Rapid::PartialDerivatives::value_type& ii, rContinuityCell[i]._dv)
+	    {
+	      if (ii.first < 6*nCells)
+		{
+		  bigEndianInteger = ii.first;
+		  LowEndian2BigEndian(bigEndianInteger);
+		  fwrite(&bigEndianInteger, sizeof(int), 1, dRdUVWPNuPhiFileBinary);
+		}
+	      else
+		{
+		  bigEndianInteger = ii.first-6*nCells;
+		  LowEndian2BigEndian(bigEndianInteger);
+		  fwrite(&bigEndianInteger, sizeof(int), 1, dRdBetaFileBinary);
+		}
+	    }
+	  foreach(const typename Rapid::PartialDerivatives::value_type& ii, rSACell[i]._dv)
+	    {
+	      if (ii.first < 6*nCells)
+		{
+		  bigEndianInteger = ii.first;
+		  LowEndian2BigEndian(bigEndianInteger);
+		  fwrite(&bigEndianInteger, sizeof(int), 1, dRdUVWPNuPhiFileBinary);
+		}
+	      else
+		{
+		  bigEndianInteger = ii.first-6*nCells;
+		  LowEndian2BigEndian(bigEndianInteger);
+		  fwrite(&bigEndianInteger, sizeof(int), 1, dRdBetaFileBinary);
+		}
+	    }
+	  foreach(const typename Rapid::PartialDerivatives::value_type& ii, rWDCell[i]._dv)
+	    {
+	      if (ii.first < 6*nCells)
+		{
+		  bigEndianInteger = ii.first;
+		  LowEndian2BigEndian(bigEndianInteger);
+		  fwrite(&bigEndianInteger, sizeof(int), 1, dRdUVWPNuPhiFileBinary);
+		}
+	      else
+		{
+		  bigEndianInteger = ii.first-6*nCells;
+		  LowEndian2BigEndian(bigEndianInteger);
+		  fwrite(&bigEndianInteger, sizeof(int), 1, dRdBetaFileBinary);
+		}
+	    }
+	}	  
+      // Values of all non-zeros for both dRdUVWP and dRdBeta
+      for(int i=0; i<nCells; i++)
+	{
+	  for (int j=0; j<3; j++)
+	    {
+	      foreach(const typename Rapid::PartialDerivatives::value_type& ii, rMomentumCell[i][j]._dv)
+		{
+		  bigEndianDouble = ii.second;
+		  LowEndian2BigEndian(bigEndianDouble);
+		  if (ii.first < 6*nCells)
+		    fwrite(&bigEndianDouble, sizeof(double), 1, dRdUVWPNuPhiFileBinary);
+		  else
+		    fwrite(&bigEndianDouble, sizeof(double), 1, dRdBetaFileBinary);
+		}
+	    }
+	  foreach(const typename Rapid::PartialDerivatives::value_type& ii, rContinuityCell[i]._dv)
+	    {
+	      bigEndianDouble = ii.second;
+	      LowEndian2BigEndian(bigEndianDouble);
+	      if (ii.first < 6*nCells)
+		fwrite(&bigEndianDouble, sizeof(double), 1, dRdUVWPNuPhiFileBinary);
+	      else
+		fwrite(&bigEndianDouble, sizeof(double), 1, dRdBetaFileBinary);
+	    }
+	  foreach(const typename Rapid::PartialDerivatives::value_type& ii, rSACell[i]._dv)
+	    {
+	      bigEndianDouble = ii.second;
+	      LowEndian2BigEndian(bigEndianDouble);
+	      if (ii.first < 6*nCells)
+		fwrite(&bigEndianDouble, sizeof(double), 1, dRdUVWPNuPhiFileBinary);
+	      else
+		fwrite(&bigEndianDouble, sizeof(double), 1, dRdBetaFileBinary);
+	    }	
+	  foreach(const typename Rapid::PartialDerivatives::value_type& ii, rWDCell[i]._dv)
+	    {
+	      bigEndianDouble = ii.second;
+	      LowEndian2BigEndian(bigEndianDouble);
+	      if (ii.first < 6*nCells)
+		fwrite(&bigEndianDouble, sizeof(double), 1, dRdUVWPNuPhiFileBinary);
+	      else
+		fwrite(&bigEndianDouble, sizeof(double), 1, dRdBetaFileBinary);
+	    }
+	}
+
+      fclose(dRdUVWPNuPhiFileBinary);
+      fclose(dRdBetaFileBinary);
+    }
+
+}
+
+
+void WriteObjectiveFunctionGradientToPetscFlowTurbulent()
+{
+  for ( int id = 0; id < _meshes.size(); id++ )
+    {
+      const Mesh& mesh = *_meshes[id];
+      const StorageSite& cells = mesh.getCells();
+      const int nCells = cells.getCountLevel1();
+      const int nCellsWithoutGhosts = cells.getSelfCount();
+
+
+      double temporaryArray[6*nCells+_nDesignVariables];
+      memset(temporaryArray, 0.0, (6*nCells+_nDesignVariables)*sizeof(double));
+    
+      double scaleFlowModel = _options["scaleFlowModelObjFunction"]._v;            
+      foreach(const typename Rapid::PartialDerivatives::value_type& ii, _objFunctionFlowModel._dv)
+	{
+	  temporaryArray[ii.first] = scaleFlowModel*ii.second;
+	}
+
+      double scaleSpalartAllmarasModel = _options["scaleSpalartAllmarasModelObjFunction"]._v;
+      foreach(const typename Rapid::PartialDerivatives::value_type& ii, _objFunctionSpalartAllmarasModel._dv)
+	{
+	  temporaryArray[ii.first] += scaleSpalartAllmarasModel*ii.second;
+	}
+
+      //Write in binary format so that Petsc can read directly
+      //Temporary variable for big endian version of the variable
+      int bigEndianInteger;
+      double bigEndianDouble;
+      //Writing dcdPhi
+      string dcdUVWPNuPhiFileNameBinary = "dcdUVWPNuPhi.binary";
+      FILE *dcdUVWPNuPhiFileBinary = fopen(dcdUVWPNuPhiFileNameBinary.c_str(),"wb"); 
+      bigEndianInteger = 1211214;
+      LowEndian2BigEndian(bigEndianInteger);
+      fwrite(&bigEndianInteger, sizeof(int), 1, dcdUVWPNuPhiFileBinary);
+                
+      bigEndianInteger = 6*nCells;
+      LowEndian2BigEndian(bigEndianInteger);
+      fwrite(&bigEndianInteger, sizeof(int), 1, dcdUVWPNuPhiFileBinary);
+      
+      for(int i=0; i<6*nCells; i++)
+	{
+	  bigEndianDouble = temporaryArray[i];
+	  LowEndian2BigEndian(bigEndianDouble);
+	  fwrite(&bigEndianDouble, sizeof(double), 1, dcdUVWPNuPhiFileBinary);
+	}
+      fclose(dcdUVWPNuPhiFileBinary);
+
+      //Writing dcdBeta
+      string dcdBetaFileNameBinary = "dcdBeta.binary";
+      FILE *dcdBetaFileBinary = fopen(dcdBetaFileNameBinary.c_str(),"wb"); 
+      bigEndianInteger = 1211214;
+      LowEndian2BigEndian(bigEndianInteger);
+      fwrite(&bigEndianInteger, sizeof(int), 1, dcdBetaFileBinary);
+      
+      bigEndianInteger = _nDesignVariables;
+      LowEndian2BigEndian(bigEndianInteger);
+      fwrite(&bigEndianInteger, sizeof(int), 1, dcdBetaFileBinary);
+
+      //for(int i=4*nCells; i<4*nCells+nCellsWithoutGhosts; i++)
+      for(int i=6*nCells; i<6*nCells+_nDesignVariables; i++)
+	{
+	  bigEndianDouble = temporaryArray[i];
+	  LowEndian2BigEndian(bigEndianDouble);
+	  fwrite(&bigEndianDouble, sizeof(double), 1, dcdBetaFileBinary);
+	}
+      fclose(dcdBetaFileBinary);
+    }
+}
+
+#endif
+
+void copyBetaField(const Field& betaField)
+{
+  const int numMeshes = _meshes.size();
+  for (int n=0; n<numMeshes; n++)
+    {
+      const Mesh& mesh = *_meshes[n];
+      const StorageSite& cells = mesh.getCells();
+			
+      const int nCells = cells.getCountLevel1();
+      const int nCellsSelfCount = cells.getSelfCount();
+
+      TArray& beta = dynamic_cast<TArray&>(_spalartAllmarasFields.beta[cells]);
+      const TArray& betaFieldFrom = dynamic_cast<const TArray&>(betaField[cells]);
+	    
+      for(int i=0; i<nCells; i++)
+	{
+	  beta[i] = betaFieldFrom[i];
+	}
+      _nDesignVariables = nCellsSelfCount;      
+    }
+}

@@ -1,0 +1,25 @@
+for (int n=0; n<numMeshes; n++)
+      {
+	const Mesh& mesh = *_meshes[n];
+	const StorageSite& cells = mesh.getCells();
+	VectorT3Array& vCell = dynamic_cast<VectorT3Array&>(_flowFields.velocity[cells]);
+	const int nCells = cells.getCount();   
+	for(int c=0; c<nCells; c++)
+	  {
+	    vCell[c][0].setIndex(c);
+	    vCell[c][1].setIndex(c+nCells);
+	    vCell[c][2].setIndex(c+2*nCells);
+	  }
+      }
+    
+    for (int n=0; n<numMeshes; n++)
+      {
+	const Mesh& mesh = *_meshes[n];
+	const StorageSite& cells = mesh.getCells();
+	TArray& pCell = dynamic_cast<TArray&>(_flowFields.pressure[cells]);
+	const int nCells = cells.getCount();  
+	for(int c=0; c<nCells; c++)
+	  {
+	    pCell[c].setIndex(c+3*nCells);
+	  }
+      }

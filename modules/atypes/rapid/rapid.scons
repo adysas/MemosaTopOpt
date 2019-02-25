@@ -1,0 +1,5 @@
+Import('env')
+
+env.createSharedLibrary('rapid',
+                        ['initRapid.cpp'],
+                        ['rlog', 'fvmbase','boost'])

@@ -1,0 +1,102 @@
+// This file os part of FVM
+// Copyright (c) 2012 FVM Authors
+// See LICENSE file for terms.
+
+#ifndef _SPALARTALLMARASMODEL_H_
+#define _SPALARTALLMARASMODEL_H_
+
+#include "Model.h"
+
+#include "GeomFields.h"
+#include "SpalartAllmarasFields.h"
+
+#include "Mesh.h"
+
+
+#include "SpalartAllmarasBC.h"
+
+template<class T>
+class SpalartAllmarasModel : public Model
+{
+public:
+
+  typedef std::map<int,SpalartAllmarasBC<T>*> SpalartAllmarasBCMap;
+  typedef std::map<int,SpalartAllmarasVC<T>*> SpalartAllmarasVCMap;
+  typedef Vector<T,3> VectorT3;
+  class Impl;
+  
+  
+  SpalartAllmarasModel(const GeomFields& geomFields,
+               SpalartAllmarasFields& thermalFields, const MeshList& meshes);
+  
+  virtual ~SpalartAllmarasModel();
+
+  virtual void init();
+  
+  SpalartAllmarasBCMap& getBCMap();
+  SpalartAllmarasVCMap& getVCMap();
+  
+  SpalartAllmarasBC<T>& getBC(const int id);
+
+  SpalartAllmarasModelOptions<T>& getOptions();
+
+  T getNuTildeFluxIntegral(const Mesh& mesh, const int faceGroupId);
+
+#if !(defined(USING_ATYPE_TANGENT) || defined(USING_ATYPE_PC) || defined(USING_ATYPE_RAPID))
+  void dumpMatrix(const string fileBase);
+#endif
+  void advance(const int niter);
+  void ComputeEddyViscosity();
+  void ComputeWallDistance(const int choice);
+
+  //Topology optimization
+#if !(defined(USING_ATYPE_TANGENT) || defined(USING_ATYPE_PC) || defined(USING_ATYPE_RAPID))
+  void buildNeighborsList(const T rMin);
+  void applyFilter();
+#endif
+
+  void initResidualFieldSpalartAllmaras();
+
+  /////////Copying fields and values ///////////////////
+
+  void copyNuTildeField(const Field& nuTildeDoubleField, const MeshList& meshesDouble);
+  void copyBetaField(const Field& betaDoubleField, const MeshList& meshesDouble);
+  void interpolateSourceFieldSIMP();
+  void updateBetaFieldGhostCells();
+  void ComputeSpalartAllmarasResidual();
+  void setObjectiveFunctionSA(const T objFunction);
+  void printResidualField();
+
+#if !(defined(USING_ATYPE_TANGENT) || defined(USING_ATYPE_PC) || defined(USING_ATYPE_RAPID))
+  void dumpBetaSensistivityFields();
+#endif
+
+  //Functions used to developing code
+  void printNuTildeField();
+  void printBetaField();
+  //////////////////////////////////////////////////////////////////////////////////////////////////////////
+  void copyMomentumResidual(const Field& momentumRes);
+  void copyContinuityResidual(const Field& continuityRes);
+  void copyMassFlux(const Field& massFlux);
+  void copyWallDistanceField(const Field& wallDistanceField);
+  void copyVorticityMagnitudeField(const Field& vorticityMagnitudeFlowField);
+  void setObjectiveFunctionFlow(const VectorT3 objFunction, const int component);
+
+  void copyBetaField(const Field& betaField);
+  void copyWallDistanceModelResidual(const Field& wallDistanceRes);
+
+
+#if ( defined(USING_ATYPE_RAPID) )
+  void setIndependentStateVariablesFlowTurbulent();
+  //void setIndependentDesignVariablesFlowTurbulent(); Don't need this since we copy from flow model
+  void WriteResidualGradientsToMatlabFlowTurbulent();
+  void WriteResidualGradientsToPetscFlowTurbulent();
+  void WriteObjectiveFunctionGradientToPetscFlowTurbulent();
+#endif
+  
+private:
+  shared_ptr<Impl> _impl;
+};
+
+#endif
+

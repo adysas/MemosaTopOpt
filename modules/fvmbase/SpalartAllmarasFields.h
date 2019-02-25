@@ -1,0 +1,61 @@
+// This file os part of FVM
+// Copyright (c) 2012 FVM Authors
+// See LICENSE file for terms.
+
+#ifndef _SPALARTALLMARASFIELDS_H_
+#define _SPALARTALLMARASFIELDS_H_
+
+
+#include "Field.h"
+#include "FieldLabel.h"
+
+struct SpalartAllmarasFields
+{
+  SpalartAllmarasFields(const string baseName);
+
+  Field nuTilde;
+  Field nuTildeN1;
+  Field nuTildeN2;
+  Field nuTildeFlux;
+  Field density;
+  Field nu;
+  Field nuTildeGradient;
+
+  Field sourceTerm1;
+  Field sourceTerm2;
+
+  Field convectionFlux;
+
+  Field zero;                     //used to fill in continuityResidual
+  Field one;                      //used to fill in density
+
+  Field diffusivity;
+
+  //Specifically for SA model compared to thermal model
+  
+  Field vorticityMagnitude;
+  Field chi;
+  Field fv1;
+  Field fv2;
+  Field STilde;
+  Field r;
+  Field g;
+  Field fw;
+  Field ft2;
+  
+  Field eddyViscosity;
+
+  Field wallDistance;
+
+  //For topology optimization
+  Field source;
+  Field spalartAllmarasResidual;
+  Field momentumResidual;
+  Field continuityResidual;
+  Field wallDistanceResidual;
+  Field beta;
+  Field sensitivity;
+
+};
+
+#endif
